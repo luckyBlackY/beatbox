@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>アカペラとボイスパーカッションの自己学習</title>
+</head>
+<body>
+    <p>私は色々な趣味があります。その中の一つとして <strong>アカペラ</strong> があります。特に <strong>ボイスパーカッション</strong> (以降、ボイパと呼ぶ)を担当していました。ボイパというのは口だけでビートを刻むことを言います。今回はそれをテーマにした自己学習です。しかし、本来達成したい目的を完全には達成できていません。ですので、それを達成するためのアドバイス等いただけると幸いです。</p>
+
+    <p>※この記事には音声ファイルが存在します。もし音声を聴く場合は <strong>必ず</strong> イヤホンをして、周りに音が聴こえないようにして下さい。</p>
+
+    <h2>自己学習の内容</h2>
+    <p>大学ではアカペラサークルに入っており、後輩に教えるということもしていました。<br>
+    その時に、ビートを楽譜に起こして後輩に渡すということもしておりましたが、結構時間がかかります。</p>
+    <h4>思ったビートをそのまま自動で楽譜に起こせたらどれだけ便利なことか</h4>
+    <p>そんなことを思っておりました。</p>
+
+    <p>それを思い出し、今回の自己学習のテーマが決まりました。</p>
+    <h3>『録音したボイパを自動で楽譜にする機構の作成』</h3>
+    <p>おそらく、処理の流れとしては以下のようになると思っています。</p>
+
+    <ol>
+        <li>録音したボイパ音声から個々のドラム音を抽出。</li>
+        <li>抽出した音声をAIモデルに入力し、ドラム音の種類を推論。</li>
+        <li>推論結果をテキスト形式に変換（例: “b s r…”）。</li>
+        <li>テキストを楽譜アプリで読み取れる形式に変換。</li>
+    </ol>
+
+    <p>本当は完全にテーマを達成してから紹介しようと思っておりましたが、少し詰まってしまったのとE資格の勉強もあってあまり時間が取れないため、今回は二番目の <strong>何のドラム音かを推測するAIモデル</strong> について、紹介します。</p>
+
+    <h2>データセット作成</h2>
+    <p>ボイパでよく出てくる6種類の音を今回は用意します(バスドラム, クローズハイハット, オープンハイハット, スネア, リムショット, クラッシュシンバル)。</p>
+
+    <p>用意方法は以下の通りです。</p>
+    <ol>
+        <li>各種の音を出し続けたものを録音する。なるべく様々な音色になるように打ち方を毎回変える。</li>
+        <li>録音の無音部分で分割し、1つの音声ファイルにつき、1つの音になるように新規保存。</li>
+    </ol>
+
+    <p>1.の工程では、各6種類の音を4~6分間録音しました(疲れました)。例として、スネアを5分間出し続けていた音声を添付します(聴く場合は必ずイヤホンして下さい)。</p>
+    <p>(スネアの音声が入る)</p>
+
+    <p>これを以下のスクリプトを用いて、分割した音声を新規保存しました。</p>
+    <pre><code>
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
+
+# 音声ファイルの読み込み
+sound = AudioSegment.from_file("スネア.wav", format="wav")
+
+# 分割の設定
+chunks = split_on_silence(
+    sound,
+    min_silence_len=200,  # 無音とみなす最小の長さ（ミリ秒）
+    silence_thresh=-40     # 無音とみなす閾値（dB）
+)
+
+# 分割された音声を保存
+for i, chunk in enumerate(chunks):
+    chunk.export(f"snare/{i}.wav", format="wav")
+    </code></pre>
+
+    <p>そうして、このように単発音の録音が完成しました。</p>
+    <p>(単発スネア音が入る)</p>
+
+    <p>このようにして、各種類に対して以下の個数のデータセットを作成しました。</p>
+    <table>
+        <thead>
+            <tr>
+                <th>バスドラム</th>
+                <th>クローズハイハット</th>
+                <th>オープンハイハット</th>
+                <th>スネア</th>
+                <th>リムショット</th>
+                <th>クラッシュシンバル</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>357</td>
+                <td>382</td>
+                <td>365</td>
+                <td>305</td>
+                <td>449</td>
+                <td>282</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <p>各種類の音声を学習用:検証用 = 8:2になるように分割したデータセットでモデルの学習を行いました。</p>
+
+    <p>各音声は長さがバラバラのため、これを全て1秒になるように調整し、固定サイズにする。そこから、 <strong>メルスペクトログラム</strong> を計算し、二次元配列を作成しました。</p>
+
+    <p>メルスペクトログラムは横軸が時間軸, 縦軸が周波数軸, 値がパワーとなっているものです。下記画像は <strong>『FSER: Deep Convolutional Neural Networks for Speech Emotion Recognition』</strong> という論文で紹介されたメルスペクトログラム画像です。この論文はメルスペクトログラムを使い、画像の問題として人間の音声の感情分類をしたというのを紹介している論文です。</p>
+    <p>(メルスペクトログラムの画像)</p>
+
+    <p>今回の自己学習でも同様に、画像の問題として扱い、この画像がどの音かというのを推論するモデルの作成をします。</p>
+
+    <h2>モデル学習</h2>
+    <p>モデルは下記のように非常にシンプルな2層の畳み込み層と2層の結合層の構造です。</p>
+    <pre><code>
+class CNNModel(nn.Module):
+    def __init__(self, num_classes=len(classes), fixed_frames=64):
+        super(CNNModel, self).__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.25),
+
+            nn.Conv2d(32, 64, kernel_size=3),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.25)
+        )
+
+        # 全結合層の入力サイズを計算
+        self.flatten_input_size = self._get_flatten_size(fixed_frames)
+
+        self.fc_layers = nn.Sequential(
+            nn.Linear(self.flatten_input_size, 128),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
+
+    def _get_flatten_size(self, fixed_frames):
+        # ダミー入力を使用してフラット化後のサイズを計算
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 1, 128, fixed_frames)
+            dummy_output = self.conv_layers(dummy_input)
+            flatten_size = dummy_output.view(-1).size(0)
+        return flatten_size
+
+    def forward(self, x):
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)  # フラット化
+        x = self.fc_layers(x)
+        return x
+    </code></pre>
+
+    <p>エポック数は60で、オプティマイザはAdamです。検証用データの損失が一番低いモデルをこの後でも使用することにしました(CPU使用で5.5分という短時間で終了)。</p>
+
+    <h2>モデルの実用</h2>
+    <p>先ほどできたモデルを用いて、単音ではなく <strong>実際にビートを刻んだ音声</strong> を入力して、正しくリズムをテキストにできるかを確認しました。</p>
+    <p>(テスト.wavが入ります)</p>
+
+    <p>このように、単音推論モデルを用いて、ビートをテキストに落とし込むことに成功しました。</p>
+
+    <h2>課題</h2>
+    <p>結論から言いますと、 <strong>このままでは全く実用化できません。</strong></p>
+    <p>(テスト_応用.wavが入る)</p>
+
+    <h2>まとめ</h2>
+    <p>メルスペクトログラムを使い、画像の問題として単音を推論するモデルを作成することには成功しました。そして、単純なビートならば、リズムをテキストに落とすことには成功しました。</p>
+
+    <p>一方で、単音推論モデルを用いての複雑なリズムの推論は現時点ではまだうまくいっておりません。こうすれば良さそう等アドバイスあれば教えていただけますと幸いです。</p>
+</body>
+</html>
